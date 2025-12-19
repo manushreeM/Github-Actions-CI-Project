@@ -11,9 +11,9 @@ env:
   DOCKER_IMAGE: acecloudacademy/bankapp:latest
 
 jobs:
-  # --------------------------------------------------
-  # COMPILE
-  # --------------------------------------------------
+# --------------------------------------------------
+# 1. COMPILE
+# --------------------------------------------------
   compile:
     runs-on: self-hosted
     steps:
@@ -21,6 +21,7 @@ jobs:
         run: |
           sudo rm -rf $GITHUB_WORKSPACE/* || true
           sudo chown -R $USER:$USER $GITHUB_WORKSPACE || true
+
       - uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -38,15 +39,9 @@ jobs:
       - name: Compile Project
         run: mvn -B compile
 
-      - name: Upload Compile Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: compile-output
-          path: target/
-
-  # --------------------------------------------------
-  # UNIT TESTS
-  # --------------------------------------------------
+# --------------------------------------------------
+# 2. UNIT TESTS
+# --------------------------------------------------
   test:
     runs-on: self-hosted
     needs: compile
@@ -68,9 +63,9 @@ jobs:
       - name: Run Unit Tests
         run: mvn -B test
 
-  # --------------------------------------------------
-  # SECURITY SCANS – TRIVY FS + GITLEAKS
-  # --------------------------------------------------
+# --------------------------------------------------
+# 3. SECURITY SCANS – TRIVY FS + GITLEAKS
+# --------------------------------------------------
   security-check:
     runs-on: self-hosted
     needs: test
@@ -87,35 +82,43 @@ jobs:
             | sudo tee /etc/apt/sources.list.d/trivy.list
           sudo apt-get update -y
           sudo apt-get install -y trivy
-      - name: Prepare Trivy HTML template
+
+      - name: Prepare Trivy HTML Template
         run: |
           mkdir -p contrib
-          wget -O contrib/html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
-      - name: Trivy FS Scan (JSON & HTML)
+          wget -q -O contrib/html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+
+      - name: Trivy FS Scan (JSON + HTML)
         run: |
-          trivy fs --exit-code 0 --severity HIGH,CRITICAL --format json --output trivy-fs-report.json .
+          trivy fs --exit-code 0 --severity HIGH,CRITICAL \
+            --format json --output trivy-fs-report.json .
           trivy fs --exit-code 0 --severity HIGH,CRITICAL \
             --format template --template "./contrib/html.tpl" \
             --output trivy-fs-report.html .
+
       - name: Install Gitleaks
         run: sudo apt-get install -y gitleaks
 
       - name: Gitleaks Scan
-        run: gitleaks detect --source . --report-path gitleaks-report.json --report-format json
+        run: gitleaks detect --source . \
+          --report-path gitleaks-report.json \
+          --report-format json
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Security Reports
+        uses: actions/upload-artifact@v4
         with:
           name: security-reports
           path: |
             trivy-fs-report.json
             trivy-fs-report.html
             gitleaks-report.json
-  # --------------------------------------------------
-  # SONARQUBE SCAN
-  # --------------------------------------------------
+
+# --------------------------------------------------
+# 4. BUILD + SONARQUBE SCAN
+# --------------------------------------------------
   build_project_and_sonar_scan:
     runs-on: self-hosted
-    needs: test
+    needs: security-check
     environment: My-CI-pipeline-envs
     steps:
       - uses: actions/checkout@v4
@@ -147,21 +150,19 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: .
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
       - name: SonarQube Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         with:
           pollingTimeoutSec: 600
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
-  # --------------------------------------------------
-  # OWASP DEPENDENCY CHECK (FAST)
-  # --------------------------------------------------
+# --------------------------------------------------
+# 5. OWASP DEPENDENCY CHECK (FAST + CACHE)
+# --------------------------------------------------
   owasp-dependency-check:
     runs-on: self-hosted
     needs: build_project_and_sonar_scan
@@ -169,7 +170,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: OWASP Dependency Check (Fast with API Key + Cache)
+      - name: OWASP Dependency Check
         continue-on-error: true
         run: |
           mkdir -p reports/owasp
@@ -184,6 +185,7 @@ jobs:
             --nvdApiKey ${{ secrets.NVD_API_KEY }} \
             --disableNodeAudit \
             --disableYarnAudit
+
       - name: Upload OWASP Report
         if: always()
         uses: actions/upload-artifact@v4
@@ -191,12 +193,12 @@ jobs:
           name: owasp-report
           path: reports/owasp
 
-  # --------------------------------------------------
-  # BUILD DOCKER IMAGE, TRIVY IMAGE SCAN & PUSH
-  # --------------------------------------------------
+# --------------------------------------------------
+# 6. DOCKER BUILD & PUSH
+# --------------------------------------------------
   build_docker_image_and_push:
     runs-on: self-hosted
-    needs: [build_project_and_sonar_scan, owasp-dependency-check]
+    needs: owasp-dependency-check
     environment: My-CI-pipeline-envs
     steps:
       - uses: actions/checkout@v4
@@ -210,38 +212,26 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker Image
-        run: docker build -t ${{ env.DOCKER_IMAGE }} .
-
-      - name: Trivy Docker Image Scan (JSON & HTML)
-        run: |
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            --format json --output trivy-image-report.json ${{ env.DOCKER_IMAGE }}
-          trivy image --exit-code 0 --severity HIGH,CRITICAL \
-            --format template --template "@contrib/html.tpl" \
-            --output trivy-image-report.html ${{ env.DOCKER_IMAGE }}
-      - uses: actions/upload-artifact@v4
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
         with:
-          name: trivy-image-report
-          path: |
-            trivy-image-report.json
-            trivy-image-report.html
-      - name: Push Docker Image
-        run: docker push ${{ env.DOCKER_IMAGE }}
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.DOCKER_IMAGE }}
 
-  # --------------------------------------------------
-  # EMAIL NOTIFICATION
-  # --------------------------------------------------
+# --------------------------------------------------
+# 7. EMAIL NOTIFICATION (GMAIL APP PASSWORD)
+# --------------------------------------------------
   email-notification:
     runs-on: self-hosted
     needs: build_docker_image_and_push
-    environment: My-CI-pipeline-envs
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -256,18 +246,21 @@ jobs:
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           from: GitHub CI <${{ secrets.GMAIL_USERNAME }}>
           to: vijayakumarbl276@gmail.com
-          subject: "CI/CD Pipeline Reports – ${{ job.status }}"
+          subject: "CI/CD Security Reports – ${{ github.repository }}"
           body: |
             Hi Vijay,
-            CI Pipeline has completed.
-            Reports attached:
+
+            CI/CD pipeline completed successfully.
+
+            Attached Reports:
             - Trivy FS Scan
-            - Trivy Docker Image Scan
             - Gitleaks Scan
             - OWASP Dependency Check
-            Docker image pushed: ${{ env.DOCKER_IMAGE }}
+
+            Docker Image:
+            ${{ env.DOCKER_IMAGE }}
+
             Regards,
-            GitHub Actions CI
+            GitHub Actions
           attachments: |
-            reports/**/*.html
-            reports/**/*.json
+            reports/**/* 
