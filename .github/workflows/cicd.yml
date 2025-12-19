@@ -2,26 +2,26 @@ name: Secure CI Pipeline
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
 
 permissions:
   contents: read
 
-jobs:
 # ==================================================
 # COMPILE
 # ==================================================
+jobs:
   compile:
     runs-on: self-hosted
     steps:
-      - name: Clean workspace
+      - name: Clean workspace (permission safe)
         run: |
           sudo rm -rf $GITHUB_WORKSPACE/* || true
           sudo chown -R ubuntu:ubuntu $GITHUB_WORKSPACE || true
 
       - uses: actions/checkout@v4
 
-      - name: Install Java & Maven
+      - name: Install Java 17 & Maven
         run: |
           sudo apt-get update -y
           sudo apt-get install -y openjdk-17-jdk maven
@@ -37,32 +37,15 @@ jobs:
     needs: compile
     steps:
       - uses: actions/checkout@v4
-      - run: mvn -B -ntp test
+      - name: Run Tests
+        run: mvn -B -ntp test
 
 # ==================================================
-# PACKAGE (UPLOAD app-jar ✅ FIX)
-# ==================================================
-  package:
-    runs-on: self-hosted
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build JAR
-        run: mvn -B -ntp package -DskipTests
-
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-jar
-          path: target/*.jar
-
-# ==================================================
-# TRIVY FS SCAN
+# TRIVY FILE SYSTEM SCAN
 # ==================================================
   security-check:
     runs-on: self-hosted
-    needs: package
+    needs: test
     steps:
       - uses: actions/checkout@v4
 
@@ -73,13 +56,14 @@ jobs:
             --format html \
             --output trivy-fs-report.html || true
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload Trivy FS Report
+        uses: actions/upload-artifact@v4
         with:
           name: trivy-fs-report
           path: trivy-fs-report.html
 
 # ==================================================
-# OWASP DEPENDENCY CHECK (FAST)
+# OWASP DEPENDENCY CHECK (FAST – NVD API KEY)
 # ==================================================
   owasp-dependency-check:
     runs-on: self-hosted
@@ -87,41 +71,57 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: OWASP Dependency Check
+      - name: OWASP Dependency Check (Docker + API Key)
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
-          mkdir -p /tmp/owasp-data /tmp/owasp-report
+          mkdir -p /tmp/owasp-report
 
           docker run --rm \
             -u $(id -u):$(id -g) \
-            -e NVD_API_KEY=$NVD_API_KEY \
             -v $(pwd):/src \
-            -v /tmp/owasp-data:/usr/share/dependency-check/data \
             -v /tmp/owasp-report:/report \
             owasp/dependency-check:latest \
             --scan /src \
             --format HTML \
             --out /report \
+            --nvdApiKey $NVD_API_KEY \
             --disableYarnAudit \
             --disableNodeAudit \
-            --disableAssembly \
-            --nvdApiKey $NVD_API_KEY \
             --failOnCVSS 7 || true
 
-          cp /tmp/owasp-report/* dependency-check-report.html
+          cp /tmp/owasp-report/*.html dependency-check-report.html
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload OWASP Report
+        uses: actions/upload-artifact@v4
         with:
           name: owasp-report
           path: dependency-check-report.html
 
 # ==================================================
-# DOCKER BUILD & PUSH (FIXED)
+# PACKAGE (CREATE JAR)
+# ==================================================
+  package:
+    runs-on: self-hosted
+    needs: owasp-dependency-check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package Application
+        run: mvn -B -ntp package
+
+      - name: Upload JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/*.jar
+
+# ==================================================
+# DOCKER BUILD & PUSH (WORKING VERSION)
 # ==================================================
   build_docker_image_and_push:
     runs-on: self-hosted
-    needs: owasp-dependency-check
+    needs: package
     environment: My-CI-pipeline-envs
     steps:
       - uses: actions/checkout@v4
@@ -157,18 +157,25 @@ jobs:
     needs:
       - compile
       - test
-      - package
       - security-check
       - owasp-dependency-check
+      - package
       - build_docker_image_and_push
     if: always()
     steps:
-      - name: Download Reports
+      - name: Download OWASP report
         uses: actions/download-artifact@v4
         with:
-          path: reports
+          name: owasp-report
+          path: reports/owasp
 
-      - name: Send Email
+      - name: Download Trivy FS report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: reports/trivy
+
+      - name: Send Email Notification
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -185,9 +192,9 @@ jobs:
 
             Status: ${{ job.status }}
 
-            Attached:
-            - OWASP Dependency Check Report
-            - Trivy FS Scan Report
+            Attached Reports:
+            - OWASP Dependency Check
+            - Trivy File System Scan
 
             Regards,
             GitHub Actions CI
