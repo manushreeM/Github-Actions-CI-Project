@@ -93,17 +93,33 @@ jobs:
 # --------------------------------------------------
   build_docker_image_and_push:
     runs-on: self-hosted
-    needs: owasp-dependency-check
+    needs: build_project_and_sonar_scan
+    environment: Github-Envs
     steps:
       - uses: actions/checkout@v4
 
-      - name: Docker Login
-        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: app
 
-      - name: Build & Push
-        run: |
-          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/secure-app:latest .
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/secure-app:latest
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: acecloudacademy/bankapp:latest
 
 # --------------------------------------------------
 # EMAIL NOTIFICATION (FIXED GMAIL AUTH)
