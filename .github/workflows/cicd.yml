@@ -89,11 +89,18 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y trivy
 
+      - name: Prepare Trivy HTML template
+        run: |
+          mkdir -p contrib
+          wget -O contrib/html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+
       - name: Trivy FS Scan (JSON & HTML)
         run: |
+          # JSON report
           trivy fs --exit-code 0 --severity HIGH,CRITICAL --format json --output trivy-fs-report.json .
+          # HTML report
           trivy fs --exit-code 0 --severity HIGH,CRITICAL \
-            --format template --template "@contrib/html.tpl" \
+            --format template --template "./contrib/html.tpl" \
             --output trivy-fs-report.html .
 
       - name: Install Gitleaks
