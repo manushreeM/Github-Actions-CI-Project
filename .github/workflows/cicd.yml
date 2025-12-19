@@ -1,134 +1,139 @@
-name: CI Pipeline
+name: Secure CI Pipeline
 
 on:
   push:
     branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  JAVA_VERSION: "17"
+  MAVEN_VERSION: "3.9.9"
+  IMAGE_NAME: acecloudacademy/bankapp
 
 jobs:
   compile:
+    name: Compile
     runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: "17"
-          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
           cache: maven
 
-      - name: Set up Maven
-        uses: s4u/setup-maven-action@v1.12.0
-        with:
-          maven-version: "3.9.9"
+      - name: Build (Compile)
+        run: mvn -B -ntp compile
 
-      - name: Build with Maven
-        run: mvn -B compile
-
-  security-check:
+  security-scan:
+    name: Security Scans
     runs-on: self-hosted
     needs: compile
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Install Trivy
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-            | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -y
-          sudo apt-get install -y trivy
+      # ✅ Trivy via official action (NO apt, NO GPG)
+      - name: Trivy Filesystem Scan
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          severity: HIGH,CRITICAL
+          exit-code: "0"
+          ignore-unfixed: true
 
-      - name: Trivy FS Scan
-        run: trivy fs --exit-code 0 --severity HIGH,CRITICAL .
-
-      - name: Install Gitleaks
-        run: sudo apt-get install -y gitleaks
-
-      - name: Gitleaks Scan
-        run: gitleaks detect --source . --report-path gitleaks-report.json --report-format json
+      # ✅ Gitleaks via official action
+      - name: Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   test:
+    name: Unit Tests
     runs-on: self-hosted
-    needs: security-check
-    steps:
-      - uses: actions/checkout@v4
+    needs: security-scan
 
-      - name: Set up JDK 17
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: "17"
-          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
           cache: maven
 
-      - name: Set up Maven
-        uses: s4u/setup-maven-action@v1.12.0
-        with:
-          maven-version: "3.9.9"
+      - name: Run Tests
+        run: mvn -B -ntp test
 
-      - name: Run Unit Tests
-        run: mvn -B test
-
-  build_project_and_sonar_scan:
+  sonar:
+    name: Build & SonarQube Analysis
     runs-on: self-hosted
     needs: test
     environment: My-CI-pipeline-envs
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up JDK 17
+      - name: Set up JDK
         uses: actions/setup-java@v4
         with:
-          java-version: "17"
-          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
           cache: maven
 
-      - name: Set up Maven
-        uses: s4u/setup-maven-action@v1.12.0
-        with:
-          maven-version: "3.9.9"
+      - name: Build Package
+        run: mvn -B -ntp package
 
-      - name: Build Project
-        run: mvn -B package
-
-      - name: Upload JAR artifact
+      - name: Upload JAR Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-jar
           path: target/*.jar
 
       - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v5.0.0
+        uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
       - name: SonarQube Quality Gate
-        uses: sonarsource/sonarqube-quality-gate-action@master
-        with:
-          pollingTimeoutSec: 600
+        uses: sonarsource/sonarqube-quality-gate-action@v1.2
+        timeout-minutes: 10
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
-  build_docker_image_and_push:
+  docker:
+    name: Docker Build & Push
     runs-on: self-hosted
-    needs: build_project_and_sonar_scan
+    needs: sonar
     environment: My-CI-pipeline-envs
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Download JAR artifact
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download JAR Artifact
         uses: actions/download-artifact@v4
         with:
           name: app-jar
           path: app
 
-      - name: Login to Docker Hub
+      - name: Docker Login
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
@@ -137,10 +142,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build and Push Docker Image
+      - name: Build & Push Image
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./Dockerfile
+          file: Dockerfile
           push: true
-          tags: acecloudacademy/bankapp:latest
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
