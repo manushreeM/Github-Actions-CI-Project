@@ -89,8 +89,12 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y trivy
 
-      - name: Trivy FS Scan
-        run: trivy fs --exit-code 0 --severity HIGH,CRITICAL --format html --output trivy-fs-report.html .
+      - name: Trivy FS Scan (JSON & HTML)
+        run: |
+          trivy fs --exit-code 0 --severity HIGH,CRITICAL --format json --output trivy-fs-report.json .
+          trivy fs --exit-code 0 --severity HIGH,CRITICAL \
+            --format template --template "@contrib/html.tpl" \
+            --output trivy-fs-report.html .
 
       - name: Install Gitleaks
         run: sudo apt-get install -y gitleaks
@@ -102,6 +106,7 @@ jobs:
         with:
           name: security-reports
           path: |
+            trivy-fs-report.json
             trivy-fs-report.html
             gitleaks-report.json
 
@@ -180,7 +185,7 @@ jobs:
           path: dependency-check-report.html
 
   # --------------------------------------------------
-  # BUILD DOCKER IMAGE AND PUSH
+  # BUILD DOCKER IMAGE, TRIVY IMAGE SCAN & PUSH
   # --------------------------------------------------
   build-docker:
     runs-on: self-hosted
@@ -203,18 +208,26 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ env.DOCKER_IMAGE }}
+      - name: Build Docker Image
+        run: docker build -t ${{ env.DOCKER_IMAGE }} .
+
+      - name: Trivy Docker Image Scan (JSON & HTML)
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            --format json --output trivy-image-report.json ${{ env.DOCKER_IMAGE }}
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            --format template --template "@contrib/html.tpl" \
+            --output trivy-image-report.html ${{ env.DOCKER_IMAGE }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: docker-image-info
-          path: .docker
+          name: trivy-image-report
+          path: |
+            trivy-image-report.json
+            trivy-image-report.html
+
+      - name: Push Docker Image
+        run: docker push ${{ env.DOCKER_IMAGE }}
 
   # --------------------------------------------------
   # EMAIL NOTIFICATION
@@ -244,6 +257,7 @@ jobs:
 
             Reports attached:
             - Trivy FS Scan
+            - Trivy Docker Image Scan
             - Gitleaks Scan
             - OWASP Dependency Check
 
