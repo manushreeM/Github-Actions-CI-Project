@@ -35,16 +35,9 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-
-          # Import Trivy GPG key
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-            | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
-
-          # Add Trivy repository
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo gpg --dearmor -o /usr/share/keyrings/trivy.gpg
           echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
             | sudo tee /etc/apt/sources.list.d/trivy.list
-
-          # Update and install Trivy
           sudo apt-get update -y
           sudo apt-get install -y trivy
 
@@ -81,7 +74,7 @@ jobs:
   build_project_and_sonar_scan:
     runs-on: self-hosted
     needs: test
-    environment: Github-Envs
+    environment: Github-Envs   # 🔥 REQUIRED
     steps:
       - uses: actions/checkout@v4
         with:
