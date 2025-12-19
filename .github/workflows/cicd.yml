@@ -228,12 +228,14 @@ jobs:
 
 # --------------------------------------------------
 
+
 # --------------------------------------------------
-# 7. EMAIL NOTIFICATION (CLEAN & CORRECT)
+# 7. EMAIL NOTIFICATION (ENVIRONMENT SECRETS)
 # --------------------------------------------------
   email-notification:
     runs-on: self-hosted
     needs: build_docker_image_and_push
+    environment: My-CI-pipeline-envs   # 🔑 IMPORTANT
     steps:
       - name: Download Security Reports
         uses: actions/download-artifact@v4
@@ -249,6 +251,7 @@ jobs:
         with:
           server_address: smtp.gmail.com
           server_port: 587
+          secure: false
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
           from: GitHub CI <${{ secrets.GMAIL_USERNAME }}>
@@ -272,4 +275,5 @@ jobs:
           attachments: |
             reports/**/*.html
             reports/**/*.json
+
 
