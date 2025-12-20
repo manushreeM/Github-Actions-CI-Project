@@ -177,9 +177,8 @@ jobs:
           mkdir -p reports/owasp
           mkdir -p $HOME/.dependency-check/data
           
-          # Run OWASP with proper flags and retries
+          # Run OWASP with NVD API Key
           docker run --rm \
-            -e NVD_API_KEY=${{ secrets.NVD_API_KEY }} \
             -v "$PWD:/src" \
             -v "$HOME/.dependency-check/data:/usr/share/dependency-check/data" \
             owasp/dependency-check:latest \
@@ -188,12 +187,13 @@ jobs:
             --format JSON \
             --out /src/reports/owasp \
             --project "BankApp CI/CD" \
+            --nvdApiKey ${{ secrets.NVD_API_KEY }} \
             --failOnCVSS 11 \
             --prettyPrint \
             --disableNodeAudit \
             --disableYarnAudit \
             --disableAssembly || {
-              echo "OWASP scan failed with NVD API, retrying with local database only..."
+              echo "⚠️ OWASP scan failed with NVD API, retrying with local database only..."
               
               # Retry without NVD updates (use cached data)
               docker run --rm \
@@ -210,7 +210,7 @@ jobs:
                 --noupdate \
                 --disableNodeAudit \
                 --disableYarnAudit \
-                --disableAssembly || echo "Both OWASP attempts failed, continuing without report..."
+                --disableAssembly || echo "❌ Both OWASP attempts failed, continuing without report..."
             }
 
       - name: Check if OWASP Reports Generated
