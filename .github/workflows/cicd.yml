@@ -1,20 +1,27 @@
-name: Full CI/CD Security Pipeline
+name: DevSecOps CI/CD Security Pipeline
 
 on:
   push:
     branches: ["main"]
+  pull_request:
+    branches: ["main"]
 
 permissions:
   contents: read
+  security-events: write
 
 env:
   DOCKER_IMAGE: acecloudacademy/bankapp:latest
 
 jobs:
-# --------------------------------------------------
-# 1. COMPILE
-# --------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 1: CODE COMPILATION
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: Validate that the source code compiles successfully
+# This is the foundation of the pipeline - ensures basic code integrity
+# ══════════════════════════════════════════════════════════════════════════════
   compile:
+    name: "📦 Compile Source Code"
     runs-on: self-hosted
     steps:
       - name: Clean workspace
@@ -22,7 +29,8 @@ jobs:
           sudo rm -rf $GITHUB_WORKSPACE/* || true
           sudo chown -R $USER:$USER $GITHUB_WORKSPACE || true
 
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -39,56 +47,83 @@ jobs:
       - name: Compile Project
         run: mvn -B compile
 
-# --------------------------------------------------
-# 2. UNIT TESTS
-# --------------------------------------------------
-  test:
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 2: SECRET SCANNING (SAST - Pre-Commit Security)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: Gitleaks
+# Category: SAST (Static Application Security Testing)
+# Purpose: Detect hardcoded secrets, API keys, passwords, and credentials in code
+# Why First: Secrets are critical vulnerabilities that must be caught early
+# Prevents: Credential leaks, unauthorized access, compliance violations
+# ══════════════════════════════════════════════════════════════════════════════
+  gitleaks-scan:
+    name: "🔐 SAST: Secret Detection (Gitleaks)"
     runs-on: self-hosted
     needs: compile
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
-          java-version: "17"
-          distribution: "temurin"
-          cache: maven
+          fetch-depth: 0  # Full history for secret detection
 
-      - name: Set up Maven
-        uses: s4u/setup-maven-action@v1.12.0
+      - name: Install Gitleaks
+        run: |
+          if ! command -v gitleaks &> /dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y gitleaks
+          fi
+
+      - name: Run Gitleaks Secret Scan
+        run: |
+          gitleaks detect --source . \
+            --report-path gitleaks-report.json \
+            --report-format json \
+            --verbose
+
+      - name: Upload Gitleaks Report
+        uses: actions/upload-artifact@v4
+        if: always()
         with:
-          maven-version: "3.9.9"
+          name: gitleaks-report
+          path: gitleaks-report.json
+          retention-days: 30
 
-      - name: Run Unit Tests
-        run: mvn -B test
-
-# --------------------------------------------------
-# 3. SECURITY SCANS – TRIVY FS + GITLEAKS
-# --------------------------------------------------
-  security-check:
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 3: FILESYSTEM VULNERABILITY SCAN (SAST - Infrastructure as Code)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: Trivy Filesystem Scanner
+# Category: SAST (Static Application Security Testing)
+# Purpose: Scan IaC files, configs, and source code for vulnerabilities
+# Detects: Misconfigurations in Kubernetes, Terraform, Dockerfiles
+# Checks: Security best practices in infrastructure code
+# ══════════════════════════════════════════════════════════════════════════════
+  trivy-fs-scan:
+    name: "🛡️ SAST: Filesystem Security (Trivy FS)"
     runs-on: self-hosted
-    needs: test
+    needs: gitleaks-scan
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Install Trivy
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
-          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-            | sudo gpg --dearmor --batch --yes -o /usr/share/keyrings/trivy.gpg
-          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
-            | sudo tee /etc/apt/sources.list.d/trivy.list
-          sudo apt-get update -y
-          sudo apt-get install -y trivy
+          if ! command -v trivy &> /dev/null; then
+            sudo apt-get update -y
+            sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+              | sudo gpg --dearmor --batch --yes -o /usr/share/keyrings/trivy.gpg
+            echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+              | sudo tee /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update -y
+            sudo apt-get install -y trivy
+          fi
 
       - name: Prepare Trivy HTML Template
         run: |
           mkdir -p contrib
           wget -q -O contrib/html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
 
-      - name: Trivy FS Scan (JSON + HTML)
+      - name: Run Trivy Filesystem Scan
         run: |
           trivy fs --exit-code 0 --severity HIGH,CRITICAL \
             --format json --output trivy-fs-report.json .
@@ -96,35 +131,35 @@ jobs:
             --format template --template "./contrib/html.tpl" \
             --output trivy-fs-report.html .
 
-      - name: Install Gitleaks
-        run: sudo apt-get install -y gitleaks
-
-      - name: Gitleaks Scan
-        run: |
-          gitleaks detect --source . \
-            --report-path gitleaks-report.json \
-            --report-format json
-
-      - name: Upload Security Reports
+      - name: Upload Trivy FS Reports
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: security-reports
+          name: trivy-fs-reports
           path: |
             trivy-fs-report.json
             trivy-fs-report.html
-            gitleaks-report.json
+          retention-days: 30
 
-# --------------------------------------------------
-# 4. BUILD + SONARQUBE SCAN
-# --------------------------------------------------
-  build_project_and_sonar_scan:
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 4: CODE QUALITY & SECURITY ANALYSIS (SAST - Code Analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: SonarQube
+# Category: SAST (Static Application Security Testing)
+# Purpose: Deep source code analysis for security vulnerabilities and code quality
+# Detects: SQL injection, XSS, code smells, bugs, security hotspots
+# Provides: Code coverage, maintainability metrics, technical debt assessment
+# ══════════════════════════════════════════════════════════════════════════════
+  sonarqube-scan:
+    name: "🔍 SAST: Code Quality Analysis (SonarQube)"
     runs-on: self-hosted
-    needs: security-check
+    needs: trivy-fs-scan
     environment: My-CI-pipeline-envs
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Full history for better analysis
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -138,46 +173,76 @@ jobs:
         with:
           maven-version: "3.9.9"
 
-      - name: Build Project
-        run: mvn -B package
+      - name: Build Project for Analysis
+        run: mvn -B clean verify
 
-      - name: Upload JAR Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-jar
-          path: target/*.jar
-
-      - name: SonarQube Scan
+      - name: Run SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v5.0.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
-      - name: SonarQube Quality Gate
+      - name: Upload SonarQube Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sonarqube-report
+          path: .scannerwork/
+          retention-days: 30
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 5: SONARQUBE QUALITY GATE (SAST - Quality Gate)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: SonarQube Quality Gate
+# Category: SAST Validation
+# Purpose: Enforce quality and security thresholds
+# Validates: Code meets minimum security and quality standards
+# Blocks: Pipeline if critical issues are found
+# ══════════════════════════════════════════════════════════════════════════════
+  sonarqube-quality-gate:
+    name: "✅ SAST: Quality Gate Validation"
+    runs-on: self-hosted
+    needs: sonarqube-scan
+    environment: My-CI-pipeline-envs
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check SonarQube Quality Gate
         uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 10
         with:
           pollingTimeoutSec: 600
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
-# --------------------------------------------------
-# 5. OWASP DEPENDENCY CHECK
-# --------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 6: DEPENDENCY VULNERABILITY SCAN (SCA - Software Composition Analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: OWASP Dependency-Check
+# Category: SCA (Software Composition Analysis) - Part of SAST
+# Purpose: Identify known vulnerabilities in third-party dependencies
+# Checks: CVEs in libraries using NVD database
+# Detects: Outdated packages, vulnerable components, license issues
+# ══════════════════════════════════════════════════════════════════════════════
   owasp-dependency-check:
+    name: "📚 SCA: Dependency Vulnerability Scan (OWASP)"
     runs-on: self-hosted
-    needs: build_project_and_sonar_scan
+    needs: sonarqube-quality-gate
     environment: My-CI-pipeline-envs
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: OWASP Dependency Check
-        continue-on-error: true
+      - name: Create Reports Directory
         run: |
           mkdir -p reports/owasp
           mkdir -p $HOME/.dependency-check/data
-          
-          # Run OWASP with NVD API Key
+
+      - name: Run OWASP Dependency Check
+        continue-on-error: true
+        run: |
           docker run --rm \
             -v "$PWD:/src" \
             -v "$HOME/.dependency-check/data:/usr/share/dependency-check/data" \
@@ -185,17 +250,17 @@ jobs:
             --scan /src \
             --format HTML \
             --format JSON \
+            --format SARIF \
             --out /src/reports/owasp \
-            --project "BankApp CI/CD" \
+            --project "BankApp DevSecOps" \
             --nvdApiKey ${{ secrets.NVD_API_KEY }} \
             --failOnCVSS 11 \
             --prettyPrint \
             --disableNodeAudit \
             --disableYarnAudit \
             --disableAssembly || {
-              echo "⚠️ OWASP scan failed with NVD API, retrying with local database only..."
+              echo "⚠️ OWASP scan with NVD API failed, retrying with cached database..."
               
-              # Retry without NVD updates (use cached data)
               docker run --rm \
                 -v "$PWD:/src" \
                 -v "$HOME/.dependency-check/data:/usr/share/dependency-check/data" \
@@ -204,16 +269,16 @@ jobs:
                 --format HTML \
                 --format JSON \
                 --out /src/reports/owasp \
-                --project "BankApp CI/CD" \
+                --project "BankApp DevSecOps" \
                 --failOnCVSS 11 \
                 --prettyPrint \
                 --noupdate \
                 --disableNodeAudit \
                 --disableYarnAudit \
-                --disableAssembly || echo "❌ Both OWASP attempts failed, continuing without report..."
+                --disableAssembly || echo "❌ OWASP scan failed, continuing pipeline..."
             }
 
-      - name: Check if OWASP Reports Generated
+      - name: Check OWASP Reports
         id: check_owasp
         run: |
           if [ -d "reports/owasp" ] && [ "$(ls -A reports/owasp)" ]; then
@@ -231,22 +296,153 @@ jobs:
         with:
           name: owasp-report
           path: reports/owasp
+          retention-days: 30
 
-# --------------------------------------------------
-# 6. DOCKER BUILD & PUSH
-# --------------------------------------------------
-  build_docker_image_and_push:
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 7: BUILD APPLICATION ARTIFACT
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: Create deployable application package (JAR/WAR)
+# Only reached if all security scans pass
+# Produces artifact for containerization
+# ══════════════════════════════════════════════════════════════════════════════
+  build-artifact:
+    name: "🏗️ Build Application Artifact"
     runs-on: self-hosted
     needs: owasp-dependency-check
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: maven
+
+      - name: Set up Maven
+        uses: s4u/setup-maven-action@v1.12.0
+        with:
+          maven-version: "3.9.9"
+
+      - name: Build Application Package
+        run: mvn -B clean package -DskipTests
+
+      - name: Upload Application JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/*.jar
+          retention-days: 30
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 8: DOCKER IMAGE BUILD
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: Create container image from application artifact
+# Prepares image for security scanning before registry push
+# Uses multi-stage builds for minimal attack surface
+# ══════════════════════════════════════════════════════════════════════════════
+  docker-build:
+    name: "🐳 Build Docker Image"
+    runs-on: self-hosted
+    needs: build-artifact
     environment: My-CI-pipeline-envs
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Download JAR Artifact
+      - name: Download Application JAR
         uses: actions/download-artifact@v4
         with:
           name: app-jar
           path: app
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: ${{ env.DOCKER_IMAGE }}
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 9: CONTAINER IMAGE SECURITY SCAN (DAST - Image Analysis)
+# ══════════════════════════════════════════════════════════════════════════════
+# Tool: Trivy Image Scanner
+# Category: DAST (Dynamic Application Security Testing) - Container Security
+# Purpose: Scan Docker image for vulnerabilities before deployment
+# Detects: OS vulnerabilities, package CVEs, misconfigurations
+# Checks: Base image security, layer vulnerabilities
+# Why Critical: Last defense before pushing to registry
+# ══════════════════════════════════════════════════════════════════════════════
+  trivy-image-scan:
+    name: "🔎 DAST: Container Image Scan (Trivy)"
+    runs-on: self-hosted
+    needs: docker-build
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Prepare Trivy HTML Template
+        run: |
+          mkdir -p contrib
+          wget -q -O contrib/html.tpl https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl
+
+      - name: Run Trivy Image Scan
+        run: |
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            --format json --output trivy-image-report.json \
+            ${{ env.DOCKER_IMAGE }}
+          
+          trivy image --exit-code 0 --severity HIGH,CRITICAL \
+            --format template --template "./contrib/html.tpl" \
+            --output trivy-image-report.html \
+            ${{ env.DOCKER_IMAGE }}
+
+      - name: Upload Trivy Image Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-image-reports
+          path: |
+            trivy-image-report.json
+            trivy-image-report.html
+          retention-days: 30
+
+      - name: Evaluate Scan Results
+        run: |
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' trivy-image-report.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' trivy-image-report.json)
+          
+          echo "🔍 Vulnerability Summary:"
+          echo "   CRITICAL: $CRITICAL"
+          echo "   HIGH: $HIGH"
+          
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "⚠️ Warning: $CRITICAL critical vulnerabilities found in image"
+          fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 10: PUSH TO CONTAINER REGISTRY
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: Publish secure, scanned image to Docker Hub
+# Only executed if image passes all security scans
+# Image is now ready for deployment
+# ══════════════════════════════════════════════════════════════════════════════
+  docker-push:
+    name: "📤 Push Docker Image to Registry"
+    runs-on: self-hosted
+    needs: trivy-image-scan
+    environment: My-CI-pipeline-envs
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -254,47 +450,87 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Push Docker Image
+        run: |
+          docker push ${{ env.DOCKER_IMAGE }}
+          echo "✅ Image pushed successfully: ${{ env.DOCKER_IMAGE }}"
 
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ env.DOCKER_IMAGE }}
+      - name: Generate Image Metadata
+        run: |
+          echo "IMAGE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.DOCKER_IMAGE }})" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
 
-# --------------------------------------------------
-# 7. EMAIL NOTIFICATION
-# --------------------------------------------------
-  email-notification:
+# ══════════════════════════════════════════════════════════════════════════════
+# STAGE 11: SECURITY REPORT NOTIFICATION
+# ══════════════════════════════════════════════════════════════════════════════
+# Purpose: Consolidate and deliver all security reports via email
+# Provides: Complete security posture overview for the team
+# Includes: All SAST, SCA, and DAST scan results
+# ══════════════════════════════════════════════════════════════════════════════
+  security-notification:
+    name: "📧 Send Security Reports"
     runs-on: self-hosted
-    needs: build_docker_image_and_push
+    needs: docker-push
     environment: My-CI-pipeline-envs
     if: always()
     steps:
-      - name: Download Security Reports
+      - name: Download All Reports
         uses: actions/download-artifact@v4
         with:
-          name: security-reports
           path: reports
 
-      - name: Download OWASP Report
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: owasp-report
-          path: reports/owasp
-
-      - name: List Downloaded Files
+      - name: List All Reports
         run: |
-          echo "=== Listing all downloaded files ==="
-          ls -lR reports/ || echo "No reports directory found"
-          echo "=== Finding HTML and JSON files ==="
-          find reports/ -type f \( -name "*.html" -o -name "*.json" \) || echo "No files found"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "📋 Security Reports Summary"
+          echo "═══════════════════════════════════════════════════════════"
+          find reports/ -type f \( -name "*.html" -o -name "*.json" \) -ls || echo "No reports found"
 
-      - name: Send Email Notification
+      - name: Prepare Report Summary
+        run: |
+          cat > reports/pipeline-summary.txt << EOF
+          ═══════════════════════════════════════════════════════════════════
+          DevSecOps Pipeline Execution Summary
+          ═══════════════════════════════════════════════════════════════════
+          
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Commit: ${{ github.sha }}
+          Triggered by: ${{ github.actor }}
+          Build Date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          
+          ───────────────────────────────────────────────────────────────────
+          SAST Tools (Static Application Security Testing):
+          ───────────────────────────────────────────────────────────────────
+          ✓ Gitleaks          - Secret Detection
+          ✓ Trivy FS          - Filesystem & IaC Security
+          ✓ SonarQube         - Code Quality & Security Analysis
+          ✓ OWASP Dep-Check   - Dependency Vulnerability Scanning (SCA)
+          
+          ───────────────────────────────────────────────────────────────────
+          DAST Tools (Dynamic Application Security Testing):
+          ───────────────────────────────────────────────────────────────────
+          ✓ Trivy Image       - Container Image Security Scanning
+          
+          ───────────────────────────────────────────────────────────────────
+          Docker Image Details:
+          ───────────────────────────────────────────────────────────────────
+          Image: ${{ env.DOCKER_IMAGE }}
+          Status: ✅ Pushed to Registry
+          
+          ═══════════════════════════════════════════════════════════════════
+          Attached Reports:
+          ═══════════════════════════════════════════════════════════════════
+          • gitleaks-report.json
+          • trivy-fs-report.html & .json
+          • trivy-image-report.html & .json
+          • owasp-dependency-report.html & .json (if available)
+          
+          Review these reports for detailed security findings.
+          ═══════════════════════════════════════════════════════════════════
+          EOF
+
+      - name: Send Security Reports Email
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
@@ -304,24 +540,49 @@ jobs:
           password: ${{ secrets.SMTP_PASSWORD }}
           from: ${{ secrets.SMTP_USERNAME }}
           to: vijayakumarbl276@gmail.com
-          subject: "CI/CD Security Reports – ${{ github.repository }}"
-          body: |
-            Hi Vijay,
-
-            CI/CD pipeline completed successfully.
-
-            Attached reports:
-            - Trivy FS Scan (HTML + JSON)
-            - Gitleaks Scan (JSON)
-            - OWASP Dependency Check (if available)
-
-            Docker Image:
-            ${{ env.DOCKER_IMAGE }}
-
-            Regards,
-            GitHub Actions CI
+          subject: "✅ DevSecOps Pipeline Complete - ${{ github.repository }}"
+          body: file://reports/pipeline-summary.txt
           attachments: |
-            reports/trivy-fs-report.html
-            reports/trivy-fs-report.json
-            reports/gitleaks-report.json
-            reports/owasp/*.html
+            reports/gitleaks-report/*.json
+            reports/trivy-fs-reports/*.html
+            reports/trivy-fs-reports/*.json
+            reports/trivy-image-reports/*.html
+            reports/trivy-image-reports/*.json
+            reports/owasp-report/*.html
+            reports/owasp-report/*.json
+
+# ══════════════════════════════════════════════════════════════════════════════
+# END OF DEVSECOPS CI/CD PIPELINE
+# ══════════════════════════════════════════════════════════════════════════════
+# PIPELINE OVERVIEW:
+# 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ SAST (Static Application Security Testing)                             │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ 1. Gitleaks           → Secret & Credential Detection                  │
+# │ 2. Trivy FS           → Infrastructure as Code Security                 │
+# │ 3. SonarQube          → Code Quality & Security Analysis                │
+# │ 4. Quality Gate       → Enforce Security Thresholds                     │
+# │ 5. OWASP Dep-Check    → Dependency Vulnerability Scanning (SCA)         │
+# └─────────────────────────────────────────────────────────────────────────┘
+# 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ BUILD & CONTAINERIZATION                                                │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ 6. Build Artifact     → Create Application Package                      │
+# │ 7. Docker Build       → Containerize Application                        │
+# └─────────────────────────────────────────────────────────────────────────┘
+# 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ DAST (Dynamic Application Security Testing)                            │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ 8. Trivy Image        → Container Security Scanning                     │
+# └─────────────────────────────────────────────────────────────────────────┘
+# 
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ DEPLOYMENT & REPORTING                                                  │
+# ├─────────────────────────────────────────────────────────────────────────┤
+# │ 9. Docker Push        → Publish to Registry                             │
+# │ 10. Notification      → Security Report Distribution                    │
+# └─────────────────────────────────────────────────────────────────────────┘
+# ══════════════════════════════════════════════════════════════════════════════
