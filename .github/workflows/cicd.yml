@@ -142,16 +142,17 @@ jobs:
           retention-days: 30
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 4: CODE QUALITY & SECURITY ANALYSIS (SAST - Code Analysis)
+# STAGE 4: CODE QUALITY & SECURITY ANALYSIS + QUALITY GATE (SAST)
 # ══════════════════════════════════════════════════════════════════════════════
-# Tool: SonarQube
+# Tool: SonarQube with Quality Gate
 # Category: SAST (Static Application Security Testing)
 # Purpose: Deep source code analysis for security vulnerabilities and code quality
 # Detects: SQL injection, XSS, code smells, bugs, security hotspots
-# Provides: Code coverage, maintainability metrics, technical debt assessment
+# Validates: Code meets minimum security and quality standards
+# Blocks: Pipeline if critical issues are found
 # ══════════════════════════════════════════════════════════════════════════════
-  sonarqube-scan:
-    name: "🔍 SAST: Code Quality Analysis (SonarQube)"
+  sonarqube-analysis:
+    name: "🔍 SAST: Code Analysis & Quality Gate (SonarQube)"
     runs-on: self-hosted
     needs: trivy-fs-scan
     environment: My-CI-pipeline-envs
@@ -182,6 +183,16 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
 
+      - name: Check SonarQube Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 10
+        with:
+          pollingTimeoutSec: 600
+          scanMetadataReportFile: .scannerwork/report-task.txt
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
       - name: Upload SonarQube Report
         uses: actions/upload-artifact@v4
         if: always()
@@ -191,34 +202,7 @@ jobs:
           retention-days: 30
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 5: SONARQUBE QUALITY GATE (SAST - Quality Gate)
-# ══════════════════════════════════════════════════════════════════════════════
-# Tool: SonarQube Quality Gate
-# Category: SAST Validation
-# Purpose: Enforce quality and security thresholds
-# Validates: Code meets minimum security and quality standards
-# Blocks: Pipeline if critical issues are found
-# ══════════════════════════════════════════════════════════════════════════════
-  sonarqube-quality-gate:
-    name: "✅ SAST: Quality Gate Validation"
-    runs-on: self-hosted
-    needs: sonarqube-scan
-    environment: My-CI-pipeline-envs
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Check SonarQube Quality Gate
-        uses: sonarsource/sonarqube-quality-gate-action@master
-        timeout-minutes: 10
-        with:
-          pollingTimeoutSec: 600
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STAGE 6: DEPENDENCY VULNERABILITY SCAN (SCA - Software Composition Analysis)
+# STAGE 5: DEPENDENCY VULNERABILITY SCAN (SCA - Software Composition Analysis)
 # ══════════════════════════════════════════════════════════════════════════════
 # Tool: OWASP Dependency-Check
 # Category: SCA (Software Composition Analysis) - Part of SAST
@@ -229,7 +213,7 @@ jobs:
   owasp-dependency-check:
     name: "📚 SCA: Dependency Vulnerability Scan (OWASP)"
     runs-on: self-hosted
-    needs: sonarqube-quality-gate
+    needs: sonarqube-analysis
     environment: My-CI-pipeline-envs
     steps:
       - name: Checkout Code
@@ -299,7 +283,7 @@ jobs:
           retention-days: 30
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 7: BUILD APPLICATION ARTIFACT
+# STAGE 6: BUILD APPLICATION ARTIFACT
 # ══════════════════════════════════════════════════════════════════════════════
 # Purpose: Create deployable application package (JAR/WAR)
 # Only reached if all security scans pass
@@ -336,7 +320,7 @@ jobs:
           retention-days: 30
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 8: DOCKER IMAGE BUILD
+# STAGE 7: DOCKER IMAGE BUILD
 # ══════════════════════════════════════════════════════════════════════════════
 # Purpose: Create container image from application artifact
 # Prepares image for security scanning before registry push
@@ -372,7 +356,7 @@ jobs:
           cache-to: type=gha,mode=max
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 9: CONTAINER IMAGE SECURITY SCAN (DAST - Image Analysis)
+# STAGE 8: CONTAINER IMAGE SECURITY SCAN (DAST - Image Analysis)
 # ══════════════════════════════════════════════════════════════════════════════
 # Tool: Trivy Image Scanner
 # Category: DAST (Dynamic Application Security Testing) - Container Security
@@ -429,7 +413,7 @@ jobs:
           fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 10: PUSH TO CONTAINER REGISTRY
+# STAGE 9: PUSH TO CONTAINER REGISTRY
 # ══════════════════════════════════════════════════════════════════════════════
 # Purpose: Publish secure, scanned image to Docker Hub
 # Only executed if image passes all security scans
@@ -461,7 +445,7 @@ jobs:
           echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 11: SECURITY REPORT NOTIFICATION
+# STAGE 10: SECURITY REPORT NOTIFICATION
 # ══════════════════════════════════════════════════════════════════════════════
 # Purpose: Consolidate and deliver all security reports via email
 # Provides: Complete security posture overview for the team
@@ -561,28 +545,27 @@ jobs:
 # ├─────────────────────────────────────────────────────────────────────────┤
 # │ 1. Gitleaks           → Secret & Credential Detection                  │
 # │ 2. Trivy FS           → Infrastructure as Code Security                 │
-# │ 3. SonarQube          → Code Quality & Security Analysis                │
-# │ 4. Quality Gate       → Enforce Security Thresholds                     │
-# │ 5. OWASP Dep-Check    → Dependency Vulnerability Scanning (SCA)         │
+# │ 3. SonarQube          → Code Quality & Security Analysis + Quality Gate │
+# │ 4. OWASP Dep-Check    → Dependency Vulnerability Scanning (SCA)         │
 # └─────────────────────────────────────────────────────────────────────────┘
 # 
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │ BUILD & CONTAINERIZATION                                                │
 # ├─────────────────────────────────────────────────────────────────────────┤
-# │ 6. Build Artifact     → Create Application Package                      │
-# │ 7. Docker Build       → Containerize Application                        │
+# │ 5. Build Artifact     → Create Application Package                      │
+# │ 6. Docker Build       → Containerize Application                        │
 # └─────────────────────────────────────────────────────────────────────────┘
 # 
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │ DAST (Dynamic Application Security Testing)                            │
 # ├─────────────────────────────────────────────────────────────────────────┤
-# │ 8. Trivy Image        → Container Security Scanning                     │
+# │ 7. Trivy Image        → Container Security Scanning                     │
 # └─────────────────────────────────────────────────────────────────────────┘
 # 
 # ┌─────────────────────────────────────────────────────────────────────────┐
 # │ DEPLOYMENT & REPORTING                                                  │
 # ├─────────────────────────────────────────────────────────────────────────┤
-# │ 9. Docker Push        → Publish to Registry                             │
-# │ 10. Notification      → Security Report Distribution                    │
+# │ 8. Docker Push        → Publish to Registry                             │
+# │ 9. Notification       → Security Report Distribution                    │
 # └─────────────────────────────────────────────────────────────────────────┘
 # ══════════════════════════════════════════════════════════════════════════════
