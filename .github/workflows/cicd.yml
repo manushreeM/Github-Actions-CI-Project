@@ -48,7 +48,7 @@ jobs:
         run: mvn -B compile
 
 # ══════════════════════════════════════════════════════════════════════════════
-# STAGE 2: SECRET SCANNING (SAST - Pre-Commit Security)
+# STAGE_2: SECRET SCANNING (SAST - Pre-Commit Security)
 # ══════════════════════════════════════════════════════════════════════════════
 # Tool: Gitleaks
 # Category: SAST (Static Application Security Testing)
