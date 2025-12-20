@@ -1,8 +1,8 @@
 name: Full CI/CD Security Pipeline
 
 on:
-  workflow_dispatch:
-
+  push:
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -245,18 +245,40 @@ jobs:
           path: reports
           merge-multiple: true
 
+      - name: Debug - Verify Secrets
+        run: |
+          echo "Checking if secrets are available..."
+          if [ -z "${{ secrets.GMAIL_USERNAME }}" ]; then
+            echo "ERROR: GMAIL_USERNAME is EMPTY!"
+            exit 1
+          else
+            echo "GMAIL_USERNAME is set: ${GMAIL_USERNAME:0:3}***"
+          fi
+          
+          if [ -z "${{ secrets.GMAIL_APP_PASSWORD }}" ]; then
+            echo "ERROR: GMAIL_APP_PASSWORD is EMPTY!"
+            exit 1
+          else
+            echo "GMAIL_APP_PASSWORD is set (length: ${#GMAIL_APP_PASSWORD})"
+          fi
+        env:
+          GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+
       - name: Send Email Notification
         uses: dawidd6/action-send-mail@v3
+        env:
+          MAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         with:
           server_address: smtp.gmail.com
           server_port: 465
           secure: true
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_APP_PASSWORD }}
-          from: GitHub CI <${{ secrets.GMAIL_USERNAME }}>
+          from: ${{ secrets.GMAIL_USERNAME }}
           to: vijayakumarbl276@gmail.com
           subject: "CI/CD Security Reports – ${{ github.repository }}"
-          priority: low
           body: |
             Hi Vijay,
 
