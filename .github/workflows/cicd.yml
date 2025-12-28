@@ -990,7 +990,7 @@ jobs:
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
           from: ${{ secrets.SMTP_USERNAME }}
-          to: vijayakumarbl276@gmail.com
+          to: manushree.sinchu@gmail.com
           subject: "✅ SUCCESS: DevSecOps Pipeline - ${{ github.repository }} [${{ github.ref_name }}]"
           body: file://reports/pipeline-summary.txt
           attachments: |
