@@ -1,4 +1,4 @@
-name: DevSecOps CI/CD Security Pipeline
+name: DevSecOps CI Security Pipeline
 
 on:
   push:
